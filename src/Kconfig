@@ -1,0 +1,8 @@
+# Virtual Atheros AR9285 (ath9k) PCI device emulation
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+config ATH9K_VIRT
+    bool
+    default y
+    depends on PCI
