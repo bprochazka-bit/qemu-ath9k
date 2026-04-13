@@ -449,6 +449,8 @@ static void ath9k_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
     hdr.channel_freq = s->current_channel_freq;
     hdr.channel_flags = s->current_channel_flags;
     hdr.channel_bond_freq = 0;
+    hdr.center_freq1 = 0;  /* AR9285 is 11n only, no VHT */
+    hdr.center_freq2 = 0;
 
     msg_len = (uint32_t)(ATH9K_MEDIUM_HDR_SIZE + frame_len);
     net_len = htonl(msg_len);
