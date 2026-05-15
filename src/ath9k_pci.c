@@ -28,7 +28,7 @@
 #include "ath9k_regs.h"
 #include "ath9k_eeprom.h"
 #include "ath9k_dma.h"
-#include "ath9k_medium.h"
+#include "vwifi.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -54,7 +54,7 @@
 #define AR_PHY_CHANSEL              0x98DC
 
 /* Maximum 802.11 frame we'll extract from TX DMA */
-#define ATH9K_MAX_FRAME_SIZE      ATH9K_MEDIUM_MAX_FRAME_SIZE
+#define ATH9K_MAX_FRAME_SIZE      VWIFI_MAX_FRAME_SIZE
 
 /* -------------------------------------------------------------------
  *  QOM boilerplate
@@ -118,7 +118,7 @@ struct Ath9kPciState {
     bool        medium_connected; /* true when socket is open */
 
     /* Stream reassembly buffer for length-prefixed messages */
-    uint8_t     medium_rxbuf[ATH9K_MEDIUM_RXBUF_SIZE];
+    uint8_t     medium_rxbuf[VWIFI_RXBUF_SIZE];
     uint32_t    medium_rxbuf_used;  /* bytes currently in rxbuf */
 
     /* Our MAC address (read from EEPROM at realize) */
@@ -310,18 +310,19 @@ static void ath9k_raise_irq(Ath9kPciState *s, uint32_t isr_bits)
  * ================================================================ */
 
 #define MEDIUM_RECONNECT_MS  2000   /* retry every 2 seconds */
-#define HELLO_MAGIC          0x41394B52  /* "A9KR" */
+#define VWIFI_HELLO_MAGIC    0x52495756  /* "VWIR" – vwifi registration */
+#define HELLO_MAGIC          VWIFI_HELLO_MAGIC
 
 /* Forward declarations */
-static void ath9k_medium_reconnect_cb(void *opaque);
-static void ath9k_medium_fd_read(void *opaque);
+static void vwifi_medium_reconnect_cb(void *opaque);
+static void vwifi_medium_fd_read(void *opaque);
 
 /*
  * Try to connect (or reconnect) to the medium hub.
  * On success, sends a hello message with our node_id.
  * Returns true if connected.
  */
-static bool ath9k_medium_try_connect(Ath9kPciState *s)
+static bool vwifi_medium_try_connect(Ath9kPciState *s)
 {
     struct sockaddr_un sun;
     int fd;
@@ -347,7 +348,7 @@ static bool ath9k_medium_try_connect(Ath9kPciState *s)
     s->medium_fd = fd;
     s->medium_connected = true;
     s->medium_rxbuf_used = 0;
-    qemu_set_fd_handler(fd, ath9k_medium_fd_read, NULL, s);
+    qemu_set_fd_handler(fd, vwifi_medium_fd_read, NULL, s);
 
     /* Send hello with node_id if configured */
     if (s->node_id && s->node_id[0] != '\0') {
@@ -380,7 +381,7 @@ static bool ath9k_medium_try_connect(Ath9kPciState *s)
 /*
  * Start the reconnect timer.  Called when we detect a disconnect.
  */
-static void ath9k_medium_schedule_reconnect(Ath9kPciState *s)
+static void vwifi_medium_schedule_reconnect(Ath9kPciState *s)
 {
     if (!s->medium_path || s->medium_path[0] == '\0')
         return;
@@ -394,14 +395,14 @@ static void ath9k_medium_schedule_reconnect(Ath9kPciState *s)
 /*
  * Reconnect timer callback — runs in QEMU main loop context.
  */
-static void ath9k_medium_reconnect_cb(void *opaque)
+static void vwifi_medium_reconnect_cb(void *opaque)
 {
     Ath9kPciState *s = ATH9K_PCI(opaque);
 
     if (s->medium_connected)
         return;
 
-    if (!ath9k_medium_try_connect(s)) {
+    if (!vwifi_medium_try_connect(s)) {
         /* Still can't connect, try again later */
         timer_mod(s->medium_reconnect_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
@@ -411,38 +412,38 @@ static void ath9k_medium_reconnect_cb(void *opaque)
 
 /*
  * Send a frame to the virtual medium via the chardev socket.
- * Wire format: [uint32_t length (network BE)] [ath9k_medium_frame_hdr] [payload]
+ * Wire format: [uint32_t length (network BE)] [vwifi_frame_hdr] [payload]
  */
-static void ath9k_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code);
 
-static void ath9k_medium_send(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_medium_send(Ath9kPciState *s, const uint8_t *frame,
                               uint16_t frame_len)
 {
-    ath9k_medium_send_rate(s, frame, frame_len, ATH9K_MEDIUM_DEFAULT_RATE);
+    vwifi_medium_send_rate(s, frame, frame_len, VWIFI_DEFAULT_RATE);
 }
 
-static void ath9k_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code)
 {
-    struct ath9k_medium_frame_hdr hdr;
+    struct vwifi_frame_hdr hdr;
     uint32_t msg_len;
     uint32_t net_len;
-    uint8_t sendbuf[4 + ATH9K_MEDIUM_HDR_SIZE + ATH9K_MEDIUM_MAX_FRAME_SIZE];
+    uint8_t sendbuf[4 + VWIFI_HDR_SIZE + VWIFI_MAX_FRAME_SIZE];
 
     if (!s->medium_connected || s->medium_fd < 0 ||
         frame_len == 0 ||
-        frame_len > ATH9K_MEDIUM_MAX_FRAME_SIZE) {
+        frame_len > VWIFI_MAX_FRAME_SIZE) {
         return;
     }
 
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic = ATH9K_MEDIUM_MAGIC;
-    hdr.version = ATH9K_MEDIUM_VERSION;
+    hdr.magic = VWIFI_MAGIC;
+    hdr.version = VWIFI_VERSION;
     hdr.frame_len = frame_len;
     memcpy(hdr.tx_mac, s->our_mac, 6);
     hdr.rate_code = rate_code;
-    hdr.rssi = ATH9K_MEDIUM_DEFAULT_RSSI;
+    hdr.rssi = VWIFI_DEFAULT_RSSI;
     hdr.tsf_lo = s->tsf_lo;
     hdr.tsf_hi = s->tsf_hi;
     hdr.flags = 0;
@@ -452,13 +453,13 @@ static void ath9k_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
     hdr.center_freq1 = 0;  /* AR9285 is 11n only, no VHT */
     hdr.center_freq2 = 0;
 
-    msg_len = (uint32_t)(ATH9K_MEDIUM_HDR_SIZE + frame_len);
+    msg_len = (uint32_t)(VWIFI_HDR_SIZE + frame_len);
     net_len = htonl(msg_len);
 
     /* Build the wire message in a single buffer for atomic write */
     memcpy(sendbuf, &net_len, 4);
-    memcpy(sendbuf + 4, &hdr, ATH9K_MEDIUM_HDR_SIZE);
-    memcpy(sendbuf + 4 + ATH9K_MEDIUM_HDR_SIZE, frame, frame_len);
+    memcpy(sendbuf + 4, &hdr, VWIFI_HDR_SIZE);
+    memcpy(sendbuf + 4 + VWIFI_HDR_SIZE, frame, frame_len);
 
     /* Write the entire wire message atomically (best-effort) */
     {
@@ -475,7 +476,7 @@ static void ath9k_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
                 close(s->medium_fd);
                 s->medium_fd = -1;
                 s->medium_connected = false;
-                ath9k_medium_schedule_reconnect(s);
+                vwifi_medium_schedule_reconnect(s);
                 return;
             }
             off += (uint32_t)n;
@@ -588,13 +589,13 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
             /* Read TX rate from descriptor ctl3 bits[7:0] (Series 0 rate).
              * This is the hardware rate code the driver selected. */
             uint32_t ds_ctl3 = 0;
-            uint8_t tx_rate = ATH9K_MEDIUM_DEFAULT_RATE;
+            uint8_t tx_rate = VWIFI_DEFAULT_RATE;
             if (pci_dma_read(&s->parent_obj,
                              desc_addr + DESC_OFF_TX_CTL3,
                              &ds_ctl3, 4) == 0) {
                 tx_rate = le32_to_cpu(ds_ctl3) & 0xFF;
                 if (tx_rate == 0) {
-                    tx_rate = ATH9K_MEDIUM_DEFAULT_RATE;
+                    tx_rate = VWIFI_DEFAULT_RATE;
                 }
             }
 
@@ -688,7 +689,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
                     send_len = ota_len;
                 }
                 if (send_len > 0) {
-                    ath9k_medium_send_rate(s, frame_buf, send_len, tx_rate);
+                    vwifi_medium_send_rate(s, frame_buf, send_len, tx_rate);
 
                     /*
                      * Cache beacon frames for auto-retransmit.
@@ -731,7 +732,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
              * ACK RSSI: use the medium default RSSI converted to
              * the unsigned 0..127 range the hardware uses.
              */
-            uint8_t ack_rssi = (uint8_t)((int)(ATH9K_MEDIUM_DEFAULT_RSSI) + 95);
+            uint8_t ack_rssi = (uint8_t)((int)(VWIFI_DEFAULT_RSSI) + 95);
 
             /* status0: per-chain TX RSSI for the received ACK
              *   AR_TxRSSIAnt00[7:0] = chain 0 RSSI */
@@ -997,7 +998,7 @@ static void ath9k_swba_timer_cb(void *opaque)
                 s->cached_beacon[30] = (uint8_t)(s->tsf_hi >> 16);
                 s->cached_beacon[31] = (uint8_t)(s->tsf_hi >> 24);
             }
-            ath9k_medium_send(s, s->cached_beacon, s->cached_beacon_len);
+            vwifi_medium_send(s, s->cached_beacon, s->cached_beacon_len);
             s->last_beacon_tx_ms = now_ms;
         }
     }
@@ -1037,7 +1038,7 @@ static inline bool in_range(hwaddr addr, uint32_t base, uint32_t count)
  *  the RX DMA path the same way beacons are injected.
  * ------------------------------------------------------------------- */
 static void ath9k_inject_rx_frame(Ath9kPciState *s,
-                                  const struct ath9k_medium_frame_hdr *hdr,
+                                  const struct vwifi_frame_hdr *hdr,
                                   const uint8_t *frame, uint16_t frame_len)
 {
     uint32_t desc_addr, ds_link, ds_data, ds_ctl1;
@@ -1183,41 +1184,41 @@ static void ath9k_inject_rx_frame(Ath9kPciState *s,
  * Process a complete medium message (after length prefix has been stripped).
  * Validates the header and injects the frame into the RX path.
  */
-static void ath9k_medium_process_msg(Ath9kPciState *s,
+static void vwifi_medium_process_msg(Ath9kPciState *s,
                                      const uint8_t *msg, uint32_t msg_len)
 {
-    struct ath9k_medium_frame_hdr hdr;
+    struct vwifi_frame_hdr hdr;
     const uint8_t *frame;
     uint32_t hdr_size;
 
     /* Accept v1 (28 bytes) or v2 (40 bytes) headers */
-    if (msg_len < ATH9K_MEDIUM_HDR_SIZE_MIN) {
+    if (msg_len < VWIFI_HDR_SIZE_MIN) {
         ath9k_warn("MEDIUM RX: message too short (%u bytes)", msg_len);
         return;
     }
 
     /* Peek at version to determine header size */
     memset(&hdr, 0, sizeof(hdr));
-    memcpy(&hdr, msg, ATH9K_MEDIUM_HDR_SIZE_V1);  /* copy v1 portion */
+    memcpy(&hdr, msg, VWIFI_HDR_SIZE_V1);  /* copy v1 portion */
 
-    if (hdr.magic != ATH9K_MEDIUM_MAGIC) {
+    if (hdr.magic != VWIFI_MAGIC) {
         ath9k_warn("MEDIUM RX: bad magic 0x%08x", hdr.magic);
         return;
     }
     if (hdr.version == 1) {
-        hdr_size = ATH9K_MEDIUM_HDR_SIZE_V1;
+        hdr_size = VWIFI_HDR_SIZE_V1;
     } else if (hdr.version == 2) {
-        hdr_size = ATH9K_MEDIUM_HDR_SIZE;
-        if (msg_len >= ATH9K_MEDIUM_HDR_SIZE) {
-            memcpy(&hdr, msg, ATH9K_MEDIUM_HDR_SIZE);  /* copy full v2 header */
+        hdr_size = VWIFI_HDR_SIZE;
+        if (msg_len >= VWIFI_HDR_SIZE) {
+            memcpy(&hdr, msg, VWIFI_HDR_SIZE);  /* copy full v2 header */
         } else {
-            hdr_size = ATH9K_MEDIUM_HDR_SIZE_V1;  /* truncated v2, treat as v1 */
+            hdr_size = VWIFI_HDR_SIZE_V1;  /* truncated v2, treat as v1 */
         }
     } else {
         ath9k_warn("MEDIUM RX: unknown version %u", hdr.version);
         return;
     }
-    if (hdr.frame_len == 0 || hdr.frame_len > ATH9K_MEDIUM_MAX_FRAME_SIZE) {
+    if (hdr.frame_len == 0 || hdr.frame_len > VWIFI_MAX_FRAME_SIZE) {
         ath9k_warn("MEDIUM RX: bad frame_len %u", hdr.frame_len);
         return;
     }
@@ -1267,7 +1268,7 @@ static void ath9k_medium_process_msg(Ath9kPciState *s,
  *  Registered via qemu_set_fd_handler() — called when the socket
  *  has data available.  We reassemble length-prefixed messages.
  * ------------------------------------------------------------------- */
-static void ath9k_medium_fd_read(void *opaque)
+static void vwifi_medium_fd_read(void *opaque)
 {
     Ath9kPciState *s = ATH9K_PCI(opaque);
     uint32_t avail, msg_len, net_len, consumed;
@@ -1277,7 +1278,7 @@ static void ath9k_medium_fd_read(void *opaque)
         return;
     }
 
-    avail = ATH9K_MEDIUM_RXBUF_SIZE - s->medium_rxbuf_used;
+    avail = VWIFI_RXBUF_SIZE - s->medium_rxbuf_used;
     if (avail == 0) {
         ath9k_error("MEDIUM RX: buffer full, resetting");
         s->medium_rxbuf_used = 0;
@@ -1295,7 +1296,7 @@ static void ath9k_medium_fd_read(void *opaque)
         s->medium_fd = -1;
         s->medium_connected = false;
         s->medium_rxbuf_used = 0;
-        ath9k_medium_schedule_reconnect(s);
+        vwifi_medium_schedule_reconnect(s);
         return;
     }
     s->medium_rxbuf_used += (uint32_t)n;
@@ -1305,7 +1306,7 @@ static void ath9k_medium_fd_read(void *opaque)
         memcpy(&net_len, s->medium_rxbuf, 4);
         msg_len = ntohl(net_len);
 
-        if (msg_len > ATH9K_MEDIUM_MAX_MSG_SIZE) {
+        if (msg_len > VWIFI_MAX_MSG_SIZE) {
             ath9k_error("MEDIUM RX: absurd msg_len %u, resetting buffer",
                         msg_len);
             s->medium_rxbuf_used = 0;
@@ -1316,7 +1317,7 @@ static void ath9k_medium_fd_read(void *opaque)
             break;
         }
 
-        ath9k_medium_process_msg(s, s->medium_rxbuf + 4, msg_len);
+        vwifi_medium_process_msg(s, s->medium_rxbuf + 4, msg_len);
 
         consumed = 4 + msg_len;
         if (consumed < s->medium_rxbuf_used) {
@@ -1840,7 +1841,7 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
         if (freq != 0 && freq != s->current_channel_freq) {
             s->current_channel_freq = freq;
             s->current_channel_flags = (freq < 3000) ?
-                ATH9K_CHAN_FLAG_2GHZ : ATH9K_CHAN_FLAG_5GHZ;
+                VWIFI_CHAN_FLAG_2GHZ : VWIFI_CHAN_FLAG_5GHZ;
             ath9k_trace("CHANNEL: tuned to %u MHz", freq);
         }
         ath9k_reg_write_raw(s, addr, val);
@@ -2074,16 +2075,16 @@ static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
     /* Create medium reconnect timer (QEMU_CLOCK_REALTIME so it fires
      * even when the guest is idle / vCPU is halted) */
     s->medium_reconnect_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
-                                              ath9k_medium_reconnect_cb, s);
+                                              vwifi_medium_reconnect_cb, s);
 
     /* Initial connection attempt */
     if (s->medium_path && s->medium_path[0] != '\0') {
-        if (!ath9k_medium_try_connect(s)) {
+        if (!vwifi_medium_try_connect(s)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "ath9k-virt: medium %s not available, "
                           "will retry every %dms\n",
                           s->medium_path, MEDIUM_RECONNECT_MS);
-            ath9k_medium_schedule_reconnect(s);
+            vwifi_medium_schedule_reconnect(s);
         }
     } else {
         qemu_log_mask(LOG_GUEST_ERROR,
