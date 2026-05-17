@@ -314,15 +314,15 @@ static void ath9k_raise_irq(Ath9kPciState *s, uint32_t isr_bits)
 #define HELLO_MAGIC          VWIFI_HELLO_MAGIC
 
 /* Forward declarations */
-static void vwifi_medium_reconnect_cb(void *opaque);
-static void vwifi_medium_fd_read(void *opaque);
+static void vwifi_ath9k_reconnect_cb(void *opaque);
+static void vwifi_ath9k_fd_read(void *opaque);
 
 /*
  * Try to connect (or reconnect) to the medium hub.
  * On success, sends a hello message with our node_id.
  * Returns true if connected.
  */
-static bool vwifi_medium_try_connect(Ath9kPciState *s)
+static bool vwifi_ath9k_try_connect(Ath9kPciState *s)
 {
     struct sockaddr_un sun;
     int fd;
@@ -348,7 +348,7 @@ static bool vwifi_medium_try_connect(Ath9kPciState *s)
     s->medium_fd = fd;
     s->medium_connected = true;
     s->medium_rxbuf_used = 0;
-    qemu_set_fd_handler(fd, vwifi_medium_fd_read, NULL, s);
+    qemu_set_fd_handler(fd, vwifi_ath9k_fd_read, NULL, s);
 
     /* Send hello with node_id if configured */
     if (s->node_id && s->node_id[0] != '\0') {
@@ -381,7 +381,7 @@ static bool vwifi_medium_try_connect(Ath9kPciState *s)
 /*
  * Start the reconnect timer.  Called when we detect a disconnect.
  */
-static void vwifi_medium_schedule_reconnect(Ath9kPciState *s)
+static void vwifi_ath9k_schedule_reconnect(Ath9kPciState *s)
 {
     if (!s->medium_path || s->medium_path[0] == '\0')
         return;
@@ -395,14 +395,14 @@ static void vwifi_medium_schedule_reconnect(Ath9kPciState *s)
 /*
  * Reconnect timer callback — runs in QEMU main loop context.
  */
-static void vwifi_medium_reconnect_cb(void *opaque)
+static void vwifi_ath9k_reconnect_cb(void *opaque)
 {
     Ath9kPciState *s = ATH9K_PCI(opaque);
 
     if (s->medium_connected)
         return;
 
-    if (!vwifi_medium_try_connect(s)) {
+    if (!vwifi_ath9k_try_connect(s)) {
         /* Still can't connect, try again later */
         timer_mod(s->medium_reconnect_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
@@ -414,16 +414,16 @@ static void vwifi_medium_reconnect_cb(void *opaque)
  * Send a frame to the virtual medium via the chardev socket.
  * Wire format: [uint32_t length (network BE)] [vwifi_frame_hdr] [payload]
  */
-static void vwifi_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code);
 
-static void vwifi_medium_send(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send(Ath9kPciState *s, const uint8_t *frame,
                               uint16_t frame_len)
 {
-    vwifi_medium_send_rate(s, frame, frame_len, VWIFI_DEFAULT_RATE);
+    vwifi_ath9k_send_rate(s, frame, frame_len, VWIFI_DEFAULT_RATE);
 }
 
-static void vwifi_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code)
 {
     struct vwifi_frame_hdr hdr;
@@ -476,7 +476,7 @@ static void vwifi_medium_send_rate(Ath9kPciState *s, const uint8_t *frame,
                 close(s->medium_fd);
                 s->medium_fd = -1;
                 s->medium_connected = false;
-                vwifi_medium_schedule_reconnect(s);
+                vwifi_ath9k_schedule_reconnect(s);
                 return;
             }
             off += (uint32_t)n;
@@ -689,7 +689,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
                     send_len = ota_len;
                 }
                 if (send_len > 0) {
-                    vwifi_medium_send_rate(s, frame_buf, send_len, tx_rate);
+                    vwifi_ath9k_send_rate(s, frame_buf, send_len, tx_rate);
 
                     /*
                      * Cache beacon frames for auto-retransmit.
@@ -998,7 +998,7 @@ static void ath9k_swba_timer_cb(void *opaque)
                 s->cached_beacon[30] = (uint8_t)(s->tsf_hi >> 16);
                 s->cached_beacon[31] = (uint8_t)(s->tsf_hi >> 24);
             }
-            vwifi_medium_send(s, s->cached_beacon, s->cached_beacon_len);
+            vwifi_ath9k_send(s, s->cached_beacon, s->cached_beacon_len);
             s->last_beacon_tx_ms = now_ms;
         }
     }
@@ -1184,7 +1184,7 @@ static void ath9k_inject_rx_frame(Ath9kPciState *s,
  * Process a complete medium message (after length prefix has been stripped).
  * Validates the header and injects the frame into the RX path.
  */
-static void vwifi_medium_process_msg(Ath9kPciState *s,
+static void vwifi_ath9k_process_msg(Ath9kPciState *s,
                                      const uint8_t *msg, uint32_t msg_len)
 {
     struct vwifi_frame_hdr hdr;
@@ -1268,7 +1268,7 @@ static void vwifi_medium_process_msg(Ath9kPciState *s,
  *  Registered via qemu_set_fd_handler() — called when the socket
  *  has data available.  We reassemble length-prefixed messages.
  * ------------------------------------------------------------------- */
-static void vwifi_medium_fd_read(void *opaque)
+static void vwifi_ath9k_fd_read(void *opaque)
 {
     Ath9kPciState *s = ATH9K_PCI(opaque);
     uint32_t avail, msg_len, net_len, consumed;
@@ -1296,7 +1296,7 @@ static void vwifi_medium_fd_read(void *opaque)
         s->medium_fd = -1;
         s->medium_connected = false;
         s->medium_rxbuf_used = 0;
-        vwifi_medium_schedule_reconnect(s);
+        vwifi_ath9k_schedule_reconnect(s);
         return;
     }
     s->medium_rxbuf_used += (uint32_t)n;
@@ -1317,7 +1317,7 @@ static void vwifi_medium_fd_read(void *opaque)
             break;
         }
 
-        vwifi_medium_process_msg(s, s->medium_rxbuf + 4, msg_len);
+        vwifi_ath9k_process_msg(s, s->medium_rxbuf + 4, msg_len);
 
         consumed = 4 + msg_len;
         if (consumed < s->medium_rxbuf_used) {
@@ -2075,16 +2075,16 @@ static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
     /* Create medium reconnect timer (QEMU_CLOCK_REALTIME so it fires
      * even when the guest is idle / vCPU is halted) */
     s->medium_reconnect_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
-                                              vwifi_medium_reconnect_cb, s);
+                                              vwifi_ath9k_reconnect_cb, s);
 
     /* Initial connection attempt */
     if (s->medium_path && s->medium_path[0] != '\0') {
-        if (!vwifi_medium_try_connect(s)) {
+        if (!vwifi_ath9k_try_connect(s)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "ath9k-virt: medium %s not available, "
                           "will retry every %dms\n",
                           s->medium_path, MEDIUM_RECONNECT_MS);
-            vwifi_medium_schedule_reconnect(s);
+            vwifi_ath9k_schedule_reconnect(s);
         }
     } else {
         qemu_log_mask(LOG_GUEST_ERROR,
