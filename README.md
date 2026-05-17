@@ -31,7 +31,7 @@ a physics-inspired channel model.
 └────────────────────────────────────┼────────┘
                                      │ MMIO R/W
 ┌────────────────────────────────────▼────────┐
-│  QEMU – ath9k_pci.c device model           │
+│  QEMU – vwifi_ath9k_pci.c device model     │
 │                                              │
 │  ┌─────────────────────────────────────────┐ │
 │  │  Register File (uint32_t[16384])        │ │
@@ -56,9 +56,11 @@ a physics-inspired channel model.
 
 | File | Purpose |
 |------|---------|
-| `src/ath9k_pci.c` | Main QEMU device model – MMIO handlers, PCI setup, lifecycle |
-| `src/ath9k_regs.h` | Register addresses and bit-field definitions from the kernel's `reg.h` |
-| `src/ath9k_eeprom.h` | EEPROM image generator – builds a valid 4K-format EEPROM at init |
+| `src/vwifi_ath9k_pci.c` | Main QEMU device model – MMIO handlers, PCI setup, lifecycle |
+| `src/vwifi_ath9k_regs.h` | Register addresses and bit-field definitions from the kernel's `reg.h` |
+| `src/vwifi_ath9k_eeprom.h` | EEPROM image generator – builds a valid 4K-format EEPROM at init |
+| `src/vwifi_ath9k_dma.h` | TX/RX descriptor DMA ring definitions |
+| `src/vwifi.h` | Virtual-medium wire protocol shared with the medium hub |
 | `src/meson.build` | Meson build integration for QEMU's build system |
 | `src/Kconfig` | Kconfig entry for enabling the device |
 | `scripts/integrate.sh` | Shell script to copy files into a QEMU tree and patch build files |
@@ -111,12 +113,32 @@ make test QEMU_SRC=/path/to/qemu
 
 # 6. (Optional) Run with a Linux guest
 make test QEMU_SRC=/path/to/qemu GUEST_IMAGE=/path/to/guest.qcow2
+
+# 7. (Optional) Install the built binary system-wide
+make install QEMU_SRC=/path/to/qemu
 ```
 
 Or do it all in one command:
 
 ```bash
 make all QEMU_SRC=/path/to/qemu
+```
+
+`make all` ends with `make install`, which installs the built
+`qemu-system-x86_64` into `INSTALL_PREFIX` (default `/usr/local`). The
+install step is skipped automatically if the binary is already present,
+so re-running `make all` is safe. To install elsewhere (no root needed):
+
+```bash
+make install QEMU_SRC=/path/to/qemu INSTALL_PREFIX=$HOME/.local
+```
+
+During development the binary is usually already installed, so `make
+install` becomes a no-op. Use `make upgrade` to force a reinstall and
+overwrite the existing binary with a freshly built one:
+
+```bash
+make upgrade QEMU_SRC=/path/to/qemu
 ```
 
 ## Manual Build (Step by Step)
@@ -140,7 +162,7 @@ make -j$(nproc)
 ./qemu-system-x86_64 \
     -machine q35 \
     -m 512 \
-    -device ath9k-virt \
+    -device vwifi-ath9k \
     -d guest_errors,unimp \
     -D /tmp/ath9k.log \
     -drive file=guest.qcow2,format=qcow2,if=virtio \
@@ -161,11 +183,11 @@ Enable it with:
 This produces output like:
 
 ```
-ath9k-virt: READ  AR_SREV                  = 0x030020ff (AR9285 v1.2)
-ath9k-virt: WRITE AR_RTC_FORCE_WAKE        = 0x00000001
-ath9k-virt: READ  AR_RTC_STATUS            = 0x00000002
-ath9k-virt: READ  EEPROM [0] = 0xa55a
-ath9k-virt: WARNING: UNHANDLED read  REG(0x00a4)       = 0x00000000
+vwifi-ath9k: READ  AR_SREV                  = 0x030020ff (AR9285 v1.2)
+vwifi-ath9k: WRITE AR_RTC_FORCE_WAKE        = 0x00000001
+vwifi-ath9k: READ  AR_RTC_STATUS            = 0x00000002
+vwifi-ath9k: READ  EEPROM [0] = 0xa55a
+vwifi-ath9k: WARNING: UNHANDLED read  REG(0x00a4)       = 0x00000000
 ```
 
 **Every unhandled register** logs a warning with the exact address and
@@ -207,7 +229,7 @@ or register handler accordingly.
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `ath9k-virt` not in `-device help` | Device not compiled in | Re-run `scripts/integrate.sh` and rebuild |
+| `vwifi-ath9k` not in `-device help` | Device not compiled in | Re-run `scripts/integrate.sh` and rebuild |
 | `Mac Chip Rev 0x00.0 is not supported` | AR_SREV returning wrong value | Check that `ath9k_mmio_read()` handles `0x4020` |
 | `Unable to initialize hardware; status: -22` | EEPROM validation failed | Check EEPROM magic, version, checksum, opCapFlags |
 | `Unable to initialize hardware; status: -5` | RTC reset timeout | AR_RTC_STATUS must return `AR_RTC_STATUS_ON` |
@@ -274,7 +296,7 @@ The generated EEPROM uses the AR9285 "4K" format:
 
 When adding support for new registers:
 
-1. Add the register address to `ath9k_regs.h`
+1. Add the register address to `vwifi_ath9k_regs.h`
 2. Add a `case` in `ath9k_mmio_read()` and/or `ath9k_mmio_write()`
 3. Add the register name to the `ath9k_reg_names[]` lookup table
 4. Test with the guest and verify the UNHANDLED warning disappears

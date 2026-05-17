@@ -26,6 +26,11 @@ QEMU_BINARY     = $(QEMU_BUILD_DIR)/qemu-system-x86_64
 GUEST_IMAGE    ?=
 NPROC          := $(shell nproc 2>/dev/null || echo 4)
 
+# Where the built QEMU binary gets installed.  Overridable, e.g.
+#   make install QEMU_SRC=/path/to/qemu INSTALL_PREFIX=$HOME/.local
+INSTALL_PREFIX ?= /usr/local
+INSTALLED_BINARY = $(INSTALL_PREFIX)/bin/qemu-system-x86_64
+
 # ---- Validation ---------------------------------------------------
 
 .PHONY: check-qemu-src
@@ -38,7 +43,7 @@ endif
 
 # ---- Targets ------------------------------------------------------
 
-.PHONY: all integrate build test clean help
+.PHONY: all integrate build test install upgrade clean help
 
 help:
 	@echo ""
@@ -50,17 +55,20 @@ help:
 	@echo "  configure  Run QEMU's configure step"
 	@echo "  build      Build QEMU with the ath9k device"
 	@echo "  test       Run the Phase 1 test suite"
+	@echo "  install    Install the built QEMU binary if not already installed"
+	@echo "  upgrade    Reinstall the built QEMU binary, overwriting any existing install"
 	@echo "  clean      Remove the build directory"
-	@echo "  all        integrate + configure + build + test"
+	@echo "  all        integrate + configure + build + test + install"
 	@echo ""
 	@echo "Required variables:"
 	@echo "  QEMU_SRC=/path/to/qemu    Path to a QEMU source tree"
 	@echo ""
 	@echo "Optional variables:"
 	@echo "  GUEST_IMAGE=/path/to.qcow2 Linux guest image for Level 3 tests"
+	@echo "  INSTALL_PREFIX=/usr/local  Install location for 'make install'"
 	@echo ""
 
-all: integrate configure build test
+all: integrate configure build test install
 
 integrate: check-qemu-src
 	@echo "=== Integrating ath9k sources into QEMU ==="
@@ -72,6 +80,7 @@ configure: check-qemu-src
 	cd "$(QEMU_BUILD_DIR)" && \
 		"$(QEMU_SRC)/configure" \
 			--target-list=x86_64-softmmu \
+			--prefix="$(INSTALL_PREFIX)" \
 			--enable-debug
 
 build: check-qemu-src
@@ -89,6 +98,26 @@ ifdef GUEST_IMAGE
 else
 	./tests/test_probe.sh "$(QEMU_BINARY)"
 endif
+
+install: check-qemu-src
+	@echo "=== Installing QEMU ==="
+	@if [ -x "$(INSTALLED_BINARY)" ]; then \
+		echo "   $(INSTALLED_BINARY) already exists – skipping install"; \
+	else \
+		test -x "$(QEMU_BINARY)" || \
+			{ echo "ERROR: $(QEMU_BINARY) not found. Run 'make build' first."; exit 1; }; \
+		echo "   Installing into $(INSTALL_PREFIX) ..."; \
+		$(MAKE) -C "$(QEMU_BUILD_DIR)" install; \
+		echo "   Installed $(INSTALLED_BINARY)"; \
+	fi
+
+upgrade: check-qemu-src
+	@echo "=== Upgrading QEMU install ==="
+	@test -x "$(QEMU_BINARY)" || \
+		{ echo "ERROR: $(QEMU_BINARY) not found. Run 'make build' first."; exit 1; }
+	@echo "   Reinstalling into $(INSTALL_PREFIX) (overwriting existing) ..."
+	$(MAKE) -C "$(QEMU_BUILD_DIR)" install
+	@echo "   Installed $(INSTALLED_BINARY)"
 
 clean: check-qemu-src
 	@echo "=== Cleaning QEMU build ==="
