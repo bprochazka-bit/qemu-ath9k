@@ -43,7 +43,7 @@ endif
 
 # ---- Targets ------------------------------------------------------
 
-.PHONY: all integrate build test install clean help
+.PHONY: all integrate build test install upgrade clean help
 
 help:
 	@echo ""
@@ -56,6 +56,7 @@ help:
 	@echo "  build      Build QEMU with the ath9k device"
 	@echo "  test       Run the Phase 1 test suite"
 	@echo "  install    Install the built QEMU binary if not already installed"
+	@echo "  upgrade    Reinstall the built QEMU binary, overwriting any existing install"
 	@echo "  clean      Remove the build directory"
 	@echo "  all        integrate + configure + build + test + install"
 	@echo ""
@@ -109,6 +110,14 @@ install: check-qemu-src
 		$(MAKE) -C "$(QEMU_BUILD_DIR)" install; \
 		echo "   Installed $(INSTALLED_BINARY)"; \
 	fi
+
+upgrade: check-qemu-src
+	@echo "=== Upgrading QEMU install ==="
+	@test -x "$(QEMU_BINARY)" || \
+		{ echo "ERROR: $(QEMU_BINARY) not found. Run 'make build' first."; exit 1; }
+	@echo "   Reinstalling into $(INSTALL_PREFIX) (overwriting existing) ..."
+	$(MAKE) -C "$(QEMU_BUILD_DIR)" install
+	@echo "   Installed $(INSTALLED_BINARY)"
 
 clean: check-qemu-src
 	@echo "=== Cleaning QEMU build ==="

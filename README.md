@@ -131,6 +131,14 @@ so re-running `make all` is safe. To install elsewhere (no root needed):
 make install QEMU_SRC=/path/to/qemu INSTALL_PREFIX=$HOME/.local
 ```
 
+During development the binary is usually already installed, so `make
+install` becomes a no-op. Use `make upgrade` to force a reinstall and
+overwrite the existing binary with a freshly built one:
+
+```bash
+make upgrade QEMU_SRC=/path/to/qemu
+```
+
 ## Manual Build (Step by Step)
 
 If you prefer not to use the Makefile:
