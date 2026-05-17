@@ -99,9 +99,9 @@ clean: check-qemu-src
 
 .PHONY: lint
 lint:
-	@echo "=== Running static analysis on ath9k sources ==="
+	@echo "=== Running static analysis on vwifi-ath9k sources ==="
 	@command -v cppcheck >/dev/null 2>&1 || \
 		{ echo "cppcheck not found – skipping"; exit 0; }
 	cppcheck --enable=all --suppress=missingInclude \
 		--suppress=unusedFunction \
-		-I src/ src/ath9k_pci.c
+		-I src/ src/vwifi_ath9k_pci.c

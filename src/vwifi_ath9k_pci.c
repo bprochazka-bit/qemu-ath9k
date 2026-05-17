@@ -9,10 +9,10 @@
  *          medium, auto-ACK for unicast frames.
  *
  * Usage:
- *   -device ath9k-virt,medium=/tmp/ath9k.sock
+ *   -device vwifi-ath9k,medium=/tmp/vwifi.sock
  *
- * Or without a medium (standalone mode, Phase 2 beacon-only):
- *   -device ath9k-virt
+ * Or without a medium (standalone mode, beacon-only):
+ *   -device vwifi-ath9k
  */
 
 #include "qemu/osdep.h"
@@ -25,9 +25,9 @@
 #include "qemu/main-loop.h"
 #include "qom/object.h"
 
-#include "ath9k_regs.h"
-#include "ath9k_eeprom.h"
-#include "ath9k_dma.h"
+#include "vwifi_ath9k_regs.h"
+#include "vwifi_ath9k_eeprom.h"
+#include "vwifi_ath9k_dma.h"
 #include "vwifi.h"
 
 #include <sys/socket.h>
@@ -59,15 +59,15 @@
 /* -------------------------------------------------------------------
  *  QOM boilerplate
  * ------------------------------------------------------------------- */
-#define TYPE_ATH9K_PCI "ath9k-virt"
-OBJECT_DECLARE_SIMPLE_TYPE(Ath9kPciState, ATH9K_PCI)
+#define TYPE_VWIFI_ATH9K "vwifi-ath9k"
+OBJECT_DECLARE_SIMPLE_TYPE(VwifiAth9kState, VWIFI_ATH9K)
 
-struct Ath9kTxQueue {
+struct VwifiAth9kTxQueue {
     uint32_t txdp;
     bool     enabled;
 };
 
-struct Ath9kPciState {
+struct VwifiAth9kState {
     PCIDevice parent_obj;
     MemoryRegion mmio;
     uint32_t regs[ATH9K_REG_COUNT];
@@ -85,7 +85,7 @@ struct Ath9kPciState {
     uint32_t power_mode;
 
     /* TX queue state */
-    struct Ath9kTxQueue tx_queues[ATH9K_VIRT_NUM_TX_QUEUES];
+    struct VwifiAth9kTxQueue tx_queues[ATH9K_VIRT_NUM_TX_QUEUES];
 
     /* RX DMA state */
     uint32_t rxdp;
@@ -110,9 +110,9 @@ struct Ath9kPciState {
     uint32_t tsf_hi;
 
     /* --- Phase 3: Virtual wireless medium --- */
-    char       *macaddr;          /* -device ath9k-virt,macaddr=00:03:7f:... */
-    char       *medium_path;      /* -device ath9k-virt,medium=/tmp/x.sock */
-    char       *node_id;          /* -device ath9k-virt,node_id=ap1 (stable identity) */
+    char       *macaddr;          /* -device vwifi-ath9k,macaddr=00:03:7f:... */
+    char       *medium_path;      /* -device vwifi-ath9k,medium=/tmp/x.sock */
+    char       *node_id;          /* -device vwifi-ath9k,node_id=ap1 (stable identity) */
     QEMUTimer  *medium_reconnect_timer;
     int         medium_fd;        /* connected socket fd, or -1 */
     bool        medium_connected; /* true when socket is open */
@@ -143,26 +143,26 @@ struct Ath9kPciState {
 /* -------------------------------------------------------------------
  *  Logging
  * ------------------------------------------------------------------- */
-#define ath9k_trace(fmt, ...)                                              \
+#define vwifi_ath9k_trace(fmt, ...)                                              \
     do {                                                                   \
         if (ATH9K_VIRT_DEBUG) {                                            \
             qemu_log_mask(LOG_GUEST_ERROR,                                 \
-                          "ath9k-virt: " fmt "\n", ## __VA_ARGS__);        \
+                          "vwifi-ath9k: " fmt "\n", ## __VA_ARGS__);        \
         }                                                                  \
     } while (0)
 
-#define ath9k_warn(fmt, ...)                                               \
+#define vwifi_ath9k_warn(fmt, ...)                                               \
     qemu_log_mask(LOG_UNIMP,                                               \
-                  "ath9k-virt: WARNING: " fmt "\n", ## __VA_ARGS__)
+                  "vwifi-ath9k: WARNING: " fmt "\n", ## __VA_ARGS__)
 
-#define ath9k_error(fmt, ...)                                              \
+#define vwifi_ath9k_error(fmt, ...)                                              \
     qemu_log_mask(LOG_GUEST_ERROR,                                         \
-                  "ath9k-virt: ERROR: " fmt "\n", ## __VA_ARGS__)
+                  "vwifi-ath9k: ERROR: " fmt "\n", ## __VA_ARGS__)
 
 /* -------------------------------------------------------------------
  *  Register name lookup
  * ------------------------------------------------------------------- */
-static const char *ath9k_reg_name(hwaddr addr)
+static const char *vwifi_ath9k_reg_name(hwaddr addr)
 {
     static char buf[32];
 
@@ -224,23 +224,23 @@ static const char *ath9k_reg_name(hwaddr addr)
 /* -------------------------------------------------------------------
  *  Safe register helpers
  * ------------------------------------------------------------------- */
-static inline uint32_t ath9k_reg_read_raw(Ath9kPciState *s, hwaddr addr)
+static inline uint32_t vwifi_ath9k_reg_read_raw(VwifiAth9kState *s, hwaddr addr)
 {
     if (addr < ATH9K_MMIO_SIZE) {
         return s->regs[addr / 4];
     }
-    ath9k_error("read out of MMIO range: 0x%" HWADDR_PRIx, addr);
+    vwifi_ath9k_error("read out of MMIO range: 0x%" HWADDR_PRIx, addr);
     return 0xdeadbeef;
 }
 
-static inline void ath9k_reg_write_raw(Ath9kPciState *s, hwaddr addr,
+static inline void vwifi_ath9k_reg_write_raw(VwifiAth9kState *s, hwaddr addr,
                                        uint32_t val)
 {
     if (addr < ATH9K_MMIO_SIZE) {
         s->regs[addr / 4] = val;
         return;
     }
-    ath9k_error("write out of MMIO range: 0x%" HWADDR_PRIx, addr);
+    vwifi_ath9k_error("write out of MMIO range: 0x%" HWADDR_PRIx, addr);
 }
 
 /* -------------------------------------------------------------------
@@ -259,7 +259,7 @@ static inline void ath9k_reg_write_raw(Ath9kPciState *s, hwaddr addr,
 #define AR5416_EEPROM_OFFSET  0x2000
 #define AR5416_EEPROM_S       2
 
-static void ath9k_eeprom_trigger(Ath9kPciState *s, hwaddr addr)
+static void vwifi_ath9k_eeprom_trigger(VwifiAth9kState *s, hwaddr addr)
 {
     uint32_t word_off = (addr - AR5416_EEPROM_OFFSET) >> AR5416_EEPROM_S;
     uint16_t val = 0;
@@ -275,13 +275,13 @@ static void ath9k_eeprom_trigger(Ath9kPciState *s, hwaddr addr)
 /* -------------------------------------------------------------------
  *  Interrupt delivery
  * ------------------------------------------------------------------- */
-static void ath9k_update_irq(Ath9kPciState *s)
+static void vwifi_ath9k_update_irq(VwifiAth9kState *s)
 {
     bool level = (s->ier & AR_IER_ENABLE) && (s->isr & s->imr);
     pci_set_irq(&s->parent_obj, level ? 1 : 0);
 }
 
-static void ath9k_raise_irq(Ath9kPciState *s, uint32_t isr_bits)
+static void vwifi_ath9k_raise_irq(VwifiAth9kState *s, uint32_t isr_bits)
 {
     s->isr |= isr_bits;
     if (!(s->ier & AR_IER_ENABLE)) {
@@ -290,12 +290,12 @@ static void ath9k_raise_irq(Ath9kPciState *s, uint32_t isr_bits)
             static uint32_t blocked_count;
             blocked_count++;
             if (blocked_count <= 5 || (blocked_count % 100) == 0) {
-                ath9k_trace("RXOK blocked by IER=0 (count=%u, isr=0x%08x)",
+                vwifi_ath9k_trace("RXOK blocked by IER=0 (count=%u, isr=0x%08x)",
                             blocked_count, s->isr);
             }
         }
     }
-    ath9k_update_irq(s);
+    vwifi_ath9k_update_irq(s);
 }
 
 /* -------------------------------------------------------------------
@@ -322,7 +322,7 @@ static void vwifi_ath9k_fd_read(void *opaque);
  * On success, sends a hello message with our node_id.
  * Returns true if connected.
  */
-static bool vwifi_ath9k_try_connect(Ath9kPciState *s)
+static bool vwifi_ath9k_try_connect(VwifiAth9kState *s)
 {
     struct sockaddr_un sun;
     int fd;
@@ -365,7 +365,7 @@ static bool vwifi_ath9k_try_connect(Ath9kPciState *s)
     }
 
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "ath9k-virt: medium connected to %s "
+                  "vwifi-ath9k: medium connected to %s "
                   "(node_id=%s, MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
                   s->medium_path,
                   (s->node_id && s->node_id[0]) ? s->node_id : "(auto)",
@@ -381,12 +381,12 @@ static bool vwifi_ath9k_try_connect(Ath9kPciState *s)
 /*
  * Start the reconnect timer.  Called when we detect a disconnect.
  */
-static void vwifi_ath9k_schedule_reconnect(Ath9kPciState *s)
+static void vwifi_ath9k_schedule_reconnect(VwifiAth9kState *s)
 {
     if (!s->medium_path || s->medium_path[0] == '\0')
         return;
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "ath9k-virt: medium disconnected, will retry in %dms\n",
+                  "vwifi-ath9k: medium disconnected, will retry in %dms\n",
                   MEDIUM_RECONNECT_MS);
     timer_mod(s->medium_reconnect_timer,
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + MEDIUM_RECONNECT_MS);
@@ -397,7 +397,7 @@ static void vwifi_ath9k_schedule_reconnect(Ath9kPciState *s)
  */
 static void vwifi_ath9k_reconnect_cb(void *opaque)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
 
     if (s->medium_connected)
         return;
@@ -414,16 +414,16 @@ static void vwifi_ath9k_reconnect_cb(void *opaque)
  * Send a frame to the virtual medium via the chardev socket.
  * Wire format: [uint32_t length (network BE)] [vwifi_frame_hdr] [payload]
  */
-static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send_rate(VwifiAth9kState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code);
 
-static void vwifi_ath9k_send(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send(VwifiAth9kState *s, const uint8_t *frame,
                               uint16_t frame_len)
 {
     vwifi_ath9k_send_rate(s, frame, frame_len, VWIFI_DEFAULT_RATE);
 }
 
-static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
+static void vwifi_ath9k_send_rate(VwifiAth9kState *s, const uint8_t *frame,
                                    uint16_t frame_len, uint8_t rate_code)
 {
     struct vwifi_frame_hdr hdr;
@@ -471,7 +471,7 @@ static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
                 if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
                     continue;
                 }
-                ath9k_warn("MEDIUM TX: write failed, disconnecting");
+                vwifi_ath9k_warn("MEDIUM TX: write failed, disconnecting");
                 qemu_set_fd_handler(s->medium_fd, NULL, NULL, NULL);
                 close(s->medium_fd);
                 s->medium_fd = -1;
@@ -484,11 +484,11 @@ static void vwifi_ath9k_send_rate(Ath9kPciState *s, const uint8_t *frame,
     }
 
     s->tx_frames_to_medium++;
-    ath9k_trace("MEDIUM TX: %u bytes to medium (total %" PRIu64 ")",
+    vwifi_ath9k_trace("MEDIUM TX: %u bytes to medium (total %" PRIu64 ")",
                 frame_len, s->tx_frames_to_medium);
 }
 
-static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
+static void vwifi_ath9k_process_tx_queue(VwifiAth9kState *s, int qnum)
 {
     uint32_t desc_addr = s->tx_queues[qnum].txdp;
     uint32_t ds_link, ds_data, ds_ctl0, ds_ctl1;
@@ -499,7 +499,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
         return;
     }
 
-    ath9k_trace("TX queue %d: DMA walk at 0x%08x", qnum, desc_addr);
+    vwifi_ath9k_trace("TX queue %d: DMA walk at 0x%08x", qnum, desc_addr);
 
     while (desc_addr != 0 && count < ATH9K_VIRT_MAX_DESC_WALK) {
         uint32_t ds_txstatus9;
@@ -543,7 +543,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
             if (ds_link == 0) {
                 /* End of chain — log this as it may explain beacon stalls */
                 if (count == 0) {
-                    ath9k_trace("TX queue %d: chain end at desc 0x%08x "
+                    vwifi_ath9k_trace("TX queue %d: chain end at desc 0x%08x "
                                 "(stale, link=0, no new frames)", qnum, desc_addr);
                 }
             }
@@ -554,7 +554,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
         frame_len = ds_ctl0 & AR_FrameLen;
         buf_len   = ds_ctl1 & AR_BufLen;
 
-        ath9k_trace("TX desc 0x%08x: link=0x%08x data=0x%08x "
+        vwifi_ath9k_trace("TX desc 0x%08x: link=0x%08x data=0x%08x "
                     "ctl0=0x%08x ctl1=0x%08x frame=%u buf=%u",
                     desc_addr, ds_link, ds_data,
                     ds_ctl0, ds_ctl1, frame_len, buf_len);
@@ -775,7 +775,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
 
     if (count > 0) {
         s->isr_s0 |= (1 << qnum);
-        ath9k_raise_irq(s, AR_ISR_TXOK);
+        vwifi_ath9k_raise_irq(s, AR_ISR_TXOK);
     }
 
     s->tx_queues[qnum].enabled = false;
@@ -785,7 +785,7 @@ static void ath9k_process_tx_queue(Ath9kPciState *s, int qnum)
 /* -------------------------------------------------------------------
  *  RX DMA – Beacon injection
  * ------------------------------------------------------------------- */
-static const uint8_t ath9k_beacon_template[] = {
+static const uint8_t vwifi_ath9k_beacon_template[] = {
     /* Frame Control: beacon */
     0x80, 0x00,
     /* Duration */
@@ -815,12 +815,12 @@ static const uint8_t ath9k_beacon_template[] = {
     /* FCS placeholder */
     0x00, 0x00, 0x00, 0x00,
 };
-#define ATH9K_BEACON_SIZE  sizeof(ath9k_beacon_template)
+#define VWIFI_ATH9K_BEACON_SIZE  sizeof(vwifi_ath9k_beacon_template)
 
-static void ath9k_inject_beacon(Ath9kPciState *s)
+static void vwifi_ath9k_inject_beacon(VwifiAth9kState *s)
 {
     uint32_t desc_addr, ds_link, ds_data, ds_ctl1;
-    uint8_t  beacon[ATH9K_BEACON_SIZE];
+    uint8_t  beacon[VWIFI_ATH9K_BEACON_SIZE];
     uint32_t rx_status[9];
     uint16_t seq_num;
 
@@ -850,7 +850,7 @@ static void ath9k_inject_beacon(Ath9kPciState *s)
     }
 
     /* Build beacon */
-    memcpy(beacon, ath9k_beacon_template, ATH9K_BEACON_SIZE);
+    memcpy(beacon, vwifi_ath9k_beacon_template, VWIFI_ATH9K_BEACON_SIZE);
     beacon[24] = (uint8_t)(s->tsf_lo);
     beacon[25] = (uint8_t)(s->tsf_lo >> 8);
     beacon[26] = (uint8_t)(s->tsf_lo >> 16);
@@ -864,13 +864,13 @@ static void ath9k_inject_beacon(Ath9kPciState *s)
     beacon[23] = (uint8_t)(seq_num >> 8);
 
     /* Write beacon to guest buffer */
-    pci_dma_write(&s->parent_obj, ds_data, beacon, ATH9K_BEACON_SIZE);
+    pci_dma_write(&s->parent_obj, ds_data, beacon, VWIFI_ATH9K_BEACON_SIZE);
 
     /* Build RX status words */
     memset(rx_status, 0, sizeof(rx_status));
     rx_status[0] = cpu_to_le32(
         (40 & 0xFF) | ((uint32_t)ATH9K_RATE_6M << 24));
-    rx_status[1] = cpu_to_le32(ATH9K_BEACON_SIZE & AR_DataLen);
+    rx_status[1] = cpu_to_le32(VWIFI_ATH9K_BEACON_SIZE & AR_DataLen);
     rx_status[2] = cpu_to_le32(s->tsf_lo);
     rx_status[4] = cpu_to_le32((40 & 0xFF) | ((uint32_t)40 << 24));
     rx_status[8] = cpu_to_le32(AR_RxDone | AR_RxFrameOK);
@@ -889,33 +889,33 @@ static void ath9k_inject_beacon(Ath9kPciState *s)
     }
 
     /* Beacons are low-rate; always deliver IRQ immediately */
-    ath9k_raise_irq(s, AR_ISR_RXOK);
+    vwifi_ath9k_raise_irq(s, AR_ISR_RXOK);
 }
 
 /* -------------------------------------------------------------------
  *  Beacon timer
  * ------------------------------------------------------------------- */
-static void ath9k_beacon_timer_cb(void *opaque)
+static void vwifi_ath9k_beacon_timer_cb(void *opaque)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
     if (!s->beacon_timer_active || !s->rx_enabled) return;
-    ath9k_inject_beacon(s);
+    vwifi_ath9k_inject_beacon(s);
     timer_mod(s->beacon_timer,
               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
               ATH9K_BEACON_INTERVAL_MS);
 }
 
-static void ath9k_beacon_timer_start(Ath9kPciState *s)
+static void vwifi_ath9k_beacon_timer_start(VwifiAth9kState *s)
 {
     if (s->beacon_timer_active) return;
     s->beacon_timer_active = true;
     timer_mod(s->beacon_timer,
               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
               ATH9K_BEACON_INTERVAL_MS);
-    ath9k_trace("Beacon timer started");
+    vwifi_ath9k_trace("Beacon timer started");
 }
 
-static void ath9k_beacon_timer_stop(Ath9kPciState *s)
+static void vwifi_ath9k_beacon_timer_stop(VwifiAth9kState *s)
 {
     if (!s->beacon_timer_active) return;
     s->beacon_timer_active = false;
@@ -934,9 +934,9 @@ static void ath9k_beacon_timer_stop(Ath9kPciState *s)
  *  We emulate this by firing SWBA periodically so the driver sends
  *  real beacons through our TX DMA path → medium.
  * ------------------------------------------------------------------- */
-static void ath9k_swba_timer_cb(void *opaque)
+static void vwifi_ath9k_swba_timer_cb(void *opaque)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
     if (!s->swba_timer_active) return;
 
     /* Advance TSF (microseconds) */
@@ -970,7 +970,7 @@ static void ath9k_swba_timer_cb(void *opaque)
     } else {
         /* Raise new SWBA */
         s->swba_pending = true;
-        ath9k_raise_irq(s, AR_ISR_SWBA);
+        vwifi_ath9k_raise_irq(s, AR_ISR_SWBA);
     }
 
     /*
@@ -1008,22 +1008,22 @@ static void ath9k_swba_timer_cb(void *opaque)
               ATH9K_BEACON_INTERVAL_MS);
 }
 
-static void ath9k_swba_timer_start(Ath9kPciState *s)
+static void vwifi_ath9k_swba_timer_start(VwifiAth9kState *s)
 {
     if (s->swba_timer_active) return;
     s->swba_timer_active = true;
     timer_mod(s->swba_timer,
               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
               ATH9K_BEACON_INTERVAL_MS);
-    ath9k_trace("SWBA timer started");
+    vwifi_ath9k_trace("SWBA timer started");
 }
 
-static void ath9k_swba_timer_stop(Ath9kPciState *s)
+static void vwifi_ath9k_swba_timer_stop(VwifiAth9kState *s)
 {
     if (!s->swba_timer_active) return;
     s->swba_timer_active = false;
     timer_del(s->swba_timer);
-    ath9k_trace("SWBA timer stopped");
+    vwifi_ath9k_trace("SWBA timer stopped");
 }
 
 static inline bool in_range(hwaddr addr, uint32_t base, uint32_t count)
@@ -1037,7 +1037,7 @@ static inline bool in_range(hwaddr addr, uint32_t base, uint32_t count)
  *  When a frame arrives from the medium (another VM), inject it into
  *  the RX DMA path the same way beacons are injected.
  * ------------------------------------------------------------------- */
-static void ath9k_inject_rx_frame(Ath9kPciState *s,
+static void vwifi_ath9k_inject_rx_frame(VwifiAth9kState *s,
                                   const struct vwifi_frame_hdr *hdr,
                                   const uint8_t *frame, uint16_t frame_len)
 {
@@ -1066,15 +1066,15 @@ static void ath9k_inject_rx_frame(Ath9kPciState *s,
         ds_link = le32_to_cpu(ds_link);
         if (ds_link != 0) {
             /* Driver relinked — advance past the already-written descriptor */
-            ath9k_trace("RX ring refilled: 0x%08x -> 0x%08x",
+            vwifi_ath9k_trace("RX ring refilled: 0x%08x -> 0x%08x",
                         desc_addr, ds_link);
             s->rxdp = ds_link;
             s->rxdp_ring_empty = false;
             desc_addr = ds_link;
         } else {
             /* Still empty — NOW raise RXEOL for real */
-            ath9k_trace("RX ring still empty at 0x%08x — RXEOL", desc_addr);
-            ath9k_raise_irq(s, AR_ISR_RXEOL);
+            vwifi_ath9k_trace("RX ring still empty at 0x%08x — RXEOL", desc_addr);
+            vwifi_ath9k_raise_irq(s, AR_ISR_RXEOL);
             s->rx_enabled = false;
             s->rxdp_ring_empty = false;
             return;
@@ -1174,17 +1174,17 @@ static void ath9k_inject_rx_frame(Ath9kPciState *s,
          * a new frame arrives and there's truly nowhere to put it.
          */
         s->rxdp_ring_empty = true;
-        ath9k_trace("RX ring end at 0x%08x — deferring RXEOL", desc_addr);
+        vwifi_ath9k_trace("RX ring end at 0x%08x — deferring RXEOL", desc_addr);
     }
 
-    ath9k_raise_irq(s, AR_ISR_RXOK);
+    vwifi_ath9k_raise_irq(s, AR_ISR_RXOK);
 }
 
 /*
  * Process a complete medium message (after length prefix has been stripped).
  * Validates the header and injects the frame into the RX path.
  */
-static void vwifi_ath9k_process_msg(Ath9kPciState *s,
+static void vwifi_ath9k_process_msg(VwifiAth9kState *s,
                                      const uint8_t *msg, uint32_t msg_len)
 {
     struct vwifi_frame_hdr hdr;
@@ -1193,7 +1193,7 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
 
     /* Accept v1 (28 bytes) or v2 (40 bytes) headers */
     if (msg_len < VWIFI_HDR_SIZE_MIN) {
-        ath9k_warn("MEDIUM RX: message too short (%u bytes)", msg_len);
+        vwifi_ath9k_warn("MEDIUM RX: message too short (%u bytes)", msg_len);
         return;
     }
 
@@ -1202,7 +1202,7 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
     memcpy(&hdr, msg, VWIFI_HDR_SIZE_V1);  /* copy v1 portion */
 
     if (hdr.magic != VWIFI_MAGIC) {
-        ath9k_warn("MEDIUM RX: bad magic 0x%08x", hdr.magic);
+        vwifi_ath9k_warn("MEDIUM RX: bad magic 0x%08x", hdr.magic);
         return;
     }
     if (hdr.version == 1) {
@@ -1215,15 +1215,15 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
             hdr_size = VWIFI_HDR_SIZE_V1;  /* truncated v2, treat as v1 */
         }
     } else {
-        ath9k_warn("MEDIUM RX: unknown version %u", hdr.version);
+        vwifi_ath9k_warn("MEDIUM RX: unknown version %u", hdr.version);
         return;
     }
     if (hdr.frame_len == 0 || hdr.frame_len > VWIFI_MAX_FRAME_SIZE) {
-        ath9k_warn("MEDIUM RX: bad frame_len %u", hdr.frame_len);
+        vwifi_ath9k_warn("MEDIUM RX: bad frame_len %u", hdr.frame_len);
         return;
     }
     if (msg_len < hdr_size + hdr.frame_len) {
-        ath9k_warn("MEDIUM RX: truncated (msg=%u, need=%u)",
+        vwifi_ath9k_warn("MEDIUM RX: truncated (msg=%u, need=%u)",
                    msg_len, hdr_size + hdr.frame_len);
         return;
     }
@@ -1235,7 +1235,7 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
 
     frame = msg + hdr_size;
 
-    ath9k_trace("MEDIUM RX: %u byte frame from "
+    vwifi_ath9k_trace("MEDIUM RX: %u byte frame from "
                 "%02x:%02x:%02x:%02x:%02x:%02x (total %" PRIu64 ")",
                 hdr.frame_len,
                 hdr.tx_mac[0], hdr.tx_mac[1], hdr.tx_mac[2],
@@ -1259,7 +1259,7 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
         return;
     }
 
-    ath9k_inject_rx_frame(s, &hdr, frame, hdr.frame_len);
+    vwifi_ath9k_inject_rx_frame(s, &hdr, frame, hdr.frame_len);
 }
 
 /* -------------------------------------------------------------------
@@ -1270,7 +1270,7 @@ static void vwifi_ath9k_process_msg(Ath9kPciState *s,
  * ------------------------------------------------------------------- */
 static void vwifi_ath9k_fd_read(void *opaque)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
     uint32_t avail, msg_len, net_len, consumed;
     ssize_t n;
 
@@ -1280,7 +1280,7 @@ static void vwifi_ath9k_fd_read(void *opaque)
 
     avail = VWIFI_RXBUF_SIZE - s->medium_rxbuf_used;
     if (avail == 0) {
-        ath9k_error("MEDIUM RX: buffer full, resetting");
+        vwifi_ath9k_error("MEDIUM RX: buffer full, resetting");
         s->medium_rxbuf_used = 0;
         return;
     }
@@ -1290,7 +1290,7 @@ static void vwifi_ath9k_fd_read(void *opaque)
         if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
             return;
         }
-        ath9k_trace("MEDIUM: socket closed (read returned %zd)", n);
+        vwifi_ath9k_trace("MEDIUM: socket closed (read returned %zd)", n);
         qemu_set_fd_handler(s->medium_fd, NULL, NULL, NULL);
         close(s->medium_fd);
         s->medium_fd = -1;
@@ -1307,7 +1307,7 @@ static void vwifi_ath9k_fd_read(void *opaque)
         msg_len = ntohl(net_len);
 
         if (msg_len > VWIFI_MAX_MSG_SIZE) {
-            ath9k_error("MEDIUM RX: absurd msg_len %u, resetting buffer",
+            vwifi_ath9k_error("MEDIUM RX: absurd msg_len %u, resetting buffer",
                         msg_len);
             s->medium_rxbuf_used = 0;
             return;
@@ -1332,9 +1332,9 @@ static void vwifi_ath9k_fd_read(void *opaque)
 /* -------------------------------------------------------------------
  *  MMIO read handler
  * ------------------------------------------------------------------- */
-static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t vwifi_ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
     uint32_t val = 0;
 
     s->read_count++;
@@ -1342,7 +1342,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     /* EEPROM trigger: reading 0x2000..0x2800 loads word into status reg */
     if (addr >= AR5416_EEPROM_OFFSET &&
         addr < AR5416_EEPROM_OFFSET + (ATH9K_EEPROM_4K_SIZE_WORDS << AR5416_EEPROM_S)) {
-        ath9k_eeprom_trigger(s, addr);
+        vwifi_ath9k_eeprom_trigger(s, addr);
         return 0;  /* the trigger read itself returns 0 on real HW */
     }
 
@@ -1357,7 +1357,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_RXCFG:
     case AR_TXCFG:
     case AR_MIBC:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     case AR_RXDP:
@@ -1368,7 +1368,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_ISR:
         val = s->isr;
         s->isr = 0;
-        ath9k_update_irq(s);
+        vwifi_ath9k_update_irq(s);
         return val;
     case AR_ISR_S0:
         val = s->isr_s0; s->isr_s0 = 0;
@@ -1396,7 +1396,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_IMR_S3:
     case AR_IMR_S4:
     case AR_IMR_S5:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
     case AR_IER:
         val = s->ier;
@@ -1408,7 +1408,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_INTR_SYNC_ENABLE:
     case AR_INTR_ASYNC_ENABLE:
     case AR_INTR_ASYNC_MASK:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
     case AR_INTR_ASYNC_CAUSE:
         val = (s->isr & s->imr) ? AR_INTR_MAC_IRQ : 0;
@@ -1435,7 +1435,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_RTC_PLL_CONTROL:
     case AR_RTC_PLL_CONTROL2:
     case AR_HOST_TIMEOUT:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* EEPROM status */
@@ -1443,8 +1443,8 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
         val = 0;  /* AR_EEPROM_ABSENT bit clear = EEPROM present */
         break;
     case AR_EEPROM_STATUS_DATA:
-        /* ath9k_eeprom_trigger() stores the word here; BUSY=0 means ready */
-        val = ath9k_reg_read_raw(s, addr);
+        /* vwifi_ath9k_eeprom_trigger() stores the word here; BUSY=0 means ready */
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* GPIO */
@@ -1453,13 +1453,13 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case AR_GPIO_OE_OUT:
     case AR_GPIO_INPUT_EN_VAL:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* PCIe / WA */
     case AR_PCIE_PM_CTRL:
     case AR_WA:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* Station / BSS */
@@ -1472,7 +1472,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_PCU_MISC_MODE2:
     case AR_PHY_ERR:
     case AR_RXBUF_READ:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* Observation / DMA debug: all idle */
@@ -1494,7 +1494,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_NEXT_SWBA:
     case AR_NEXT_TIM:
     case AR_NEXT_DTIM:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     /* PHY */
@@ -1503,15 +1503,15 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case AR_PHY_MODE:
     case AR_PHY_CCA:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
     case AR_PHY_AGC_CONTROL:
         /* Cal bits auto-clear: calibration "completes" instantly */
-        val = ath9k_reg_read_raw(s, addr) &
+        val = vwifi_ath9k_reg_read_raw(s, addr) &
               ~(AR_PHY_AGC_CONTROL_CAL | AR_PHY_AGC_CONTROL_NF);
         break;
     case AR_PHY_RFBUS_REQ:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
     case AR_PHY_RFBUS_GRANT:
         val = AR_PHY_RFBUS_GRANT_EN; /* always grant */
@@ -1523,7 +1523,7 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case AR_D_GBL_IFS_EIFS:
     case AR_D_GBL_IFS_MISC:
     case AR_D_FPCTL:
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         break;
 
     default:
@@ -1543,20 +1543,20 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
             in_range(addr, AR_D0_CHNTIME, AR_NUM_DCU) ||
             in_range(addr, AR_D0_MISC, AR_NUM_DCU) ||
             in_range(addr, AR_D0_SEQNUM, AR_NUM_DCU)) {
-            val = ath9k_reg_read_raw(s, addr);
+            val = vwifi_ath9k_reg_read_raw(s, addr);
             break;
         }
         /* PHY register space */
         if (addr >= AR_PHY_BASE && addr < ATH9K_MMIO_SIZE) {
-            val = ath9k_reg_read_raw(s, addr);
+            val = vwifi_ath9k_reg_read_raw(s, addr);
             break;
         }
         /* Truly unhandled */
-        val = ath9k_reg_read_raw(s, addr);
+        val = vwifi_ath9k_reg_read_raw(s, addr);
         s->unhandled_read_count++;
         if (s->unhandled_read_count <= 200) {
-            ath9k_warn("UNHANDLED read  %-24s = 0x%08x",
-                       ath9k_reg_name(addr), val);
+            vwifi_ath9k_warn("UNHANDLED read  %-24s = 0x%08x",
+                       vwifi_ath9k_reg_name(addr), val);
         }
         return val;
     }
@@ -1568,10 +1568,10 @@ static uint64_t ath9k_mmio_read(void *opaque, hwaddr addr, unsigned size)
 /* -------------------------------------------------------------------
  *  MMIO write handler
  * ------------------------------------------------------------------- */
-static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
+static void vwifi_ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
                              unsigned size)
 {
-    Ath9kPciState *s = ATH9K_PCI(opaque);
+    VwifiAth9kState *s = VWIFI_ATH9K(opaque);
     uint32_t val = (uint32_t)val64;
     int q;
 
@@ -1582,16 +1582,16 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
 
     /* --- MAC / DMA core --- */
     case AR_CR:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         if (val & AR_CR_RXE) {
             s->rx_enabled = true;
             s->rxdp_ring_empty = false;  /* driver is providing fresh ring */
-            ath9k_trace("RX DMA enabled");
+            vwifi_ath9k_trace("RX DMA enabled");
             /* Phase 2 standalone mode: self-inject beacons into own RX.
              * When medium is connected, SWBA timer handles beacons
              * via the driver's real TX path instead. */
             if (!s->medium_connected) {
-                ath9k_beacon_timer_start(s);
+                vwifi_ath9k_beacon_timer_start(s);
             }
         }
         if (val & AR_CR_RXD) {
@@ -1621,9 +1621,9 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
              * For Phase 2 standalone beacons we still stop the timer
              * to avoid injecting into a half-rebuilt ring.
              */
-            ath9k_trace("RX DMA disable requested (ignored for medium)");
+            vwifi_ath9k_trace("RX DMA disable requested (ignored for medium)");
             if (!s->medium_connected) {
-                ath9k_beacon_timer_stop(s);
+                vwifi_ath9k_beacon_timer_stop(s);
             }
         }
         break;
@@ -1632,26 +1632,26 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_RXCFG:
     case AR_TXCFG:
     case AR_MIBC:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     case AR_RXDP:
         s->rxdp = val;
         s->rxdp_ring_empty = false;  /* fresh chain from driver */
-        ath9k_trace("WRITE AR_RXDP = 0x%08x", val);
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_trace("WRITE AR_RXDP = 0x%08x", val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- Interrupts --- */
     case AR_IER:
         s->ier = val;
-        ath9k_reg_write_raw(s, addr, val);
-        ath9k_trace("WRITE AR_IER = 0x%08x (irqs %s)", val,
+        vwifi_ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_trace("WRITE AR_IER = 0x%08x (irqs %s)", val,
                     (val & AR_IER_ENABLE) ? "ENABLED" : "DISABLED");
-        ath9k_update_irq(s);
+        vwifi_ath9k_update_irq(s);
         break;
     case AR_IMR:
-        ath9k_reg_write_raw(s, addr, val);   /* raw value for readback */
+        vwifi_ath9k_reg_write_raw(s, addr, val);   /* raw value for readback */
         /*
          * The ath9k driver routes RXOK via AR_IMR_S5 and TXOK via
          * AR_IMR_S0 (secondary interrupt registers), so neither bit
@@ -1665,50 +1665,50 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
          * driver readback via reg_read_raw.
          */
         s->imr = val | AR_ISR_RXOK | AR_ISR_TXOK;
-        ath9k_trace("WRITE AR_IMR = 0x%08x", val);
-        ath9k_update_irq(s);
+        vwifi_ath9k_trace("WRITE AR_IMR = 0x%08x", val);
+        vwifi_ath9k_update_irq(s);
         break;
     case AR_IMR_S0:
         s->imr_s0 = val;
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
     case AR_IMR_S1:
         s->imr_s1 = val;
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
     case AR_IMR_S2:
     case AR_IMR_S3:
     case AR_IMR_S4:
     case AR_IMR_S5:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     case AR_ISR:
         /* Write-to-clear */
         if (val != 0) {
-            ath9k_trace("WRITE AR_ISR (clear) = 0x%08x, isr was 0x%08x -> 0x%08x",
+            vwifi_ath9k_trace("WRITE AR_ISR (clear) = 0x%08x, isr was 0x%08x -> 0x%08x",
                         val, s->isr, s->isr & ~val);
         }
         s->isr &= ~val;
-        ath9k_update_irq(s);
+        vwifi_ath9k_update_irq(s);
         break;
 
     case AR_INTR_SYNC_ENABLE:
     case AR_INTR_SYNC_CAUSE:
     case AR_INTR_ASYNC_ENABLE:
     case AR_INTR_ASYNC_MASK:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- TX queues --- */
     case AR_Q_TXE:
-        ath9k_trace("WRITE AR_Q_TXE = 0x%08x", val);
+        vwifi_ath9k_trace("WRITE AR_Q_TXE = 0x%08x", val);
         /* Set bits enable queues; process each newly enabled queue */
         for (q = 0; q < ATH9K_VIRT_NUM_TX_QUEUES; q++) {
             if ((val & (1 << q)) && !s->tx_queues[q].enabled) {
                 s->tx_queues[q].enabled = true;
                 s->regs[AR_Q_TXE / 4] |= (1 << q);
-                ath9k_process_tx_queue(s, q);
+                vwifi_ath9k_process_tx_queue(s, q);
             }
         }
         break;
@@ -1725,15 +1725,15 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
 
     /* --- RTC / Power --- */
     case AR_RTC_RC:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         s->regs[AR_RTC_STATUS / 4] = AR_RTC_STATUS_ON;
         break;
     case AR_RTC_RESET:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         s->regs[AR_RTC_STATUS / 4] = AR_RTC_STATUS_ON;
         break;
     case AR_RTC_FORCE_WAKE:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         if (val & AR_RTC_FORCE_WAKE_EN) {
             s->power_mode = ATH9K_PM_AWAKE;
             s->regs[AR_RTC_STATUS / 4] = AR_RTC_STATUS_ON;
@@ -1742,25 +1742,25 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_RTC_PLL_CONTROL:
     case AR_RTC_PLL_CONTROL2:
     case AR_HOST_TIMEOUT:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- EEPROM --- */
     case AR_EEPROM:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- GPIO --- */
     case AR_GPIO_OE_OUT:
     case AR_GPIO_IN_OUT:
     case AR_GPIO_INPUT_EN_VAL:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- PCIe / WA --- */
     case AR_PCIE_PM_CTRL:
     case AR_WA:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- Station / BSS --- */
@@ -1768,7 +1768,7 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_STA_ID1:
     case AR_BSS_ID0:
     case AR_BSS_ID1:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- RX filter / Diagnostic --- */
@@ -1776,7 +1776,7 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_DIAG_SW:
     case AR_PCU_MISC_MODE2:
     case AR_OBS:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /* --- Beacon / Timer --- */
@@ -1790,28 +1790,28 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_NEXT_SWBA:
     case AR_NEXT_TIM:
     case AR_NEXT_DTIM:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
     case AR_TIMER_MODE:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         /* Start or stop SWBA timer based on AR_SWBA_TIMER_EN bit */
         if (val & AR_SWBA_TIMER_EN) {
-            ath9k_swba_timer_start(s);
+            vwifi_ath9k_swba_timer_start(s);
         } else {
-            ath9k_swba_timer_stop(s);
+            vwifi_ath9k_swba_timer_stop(s);
         }
         break;
 
     /* --- PHY --- */
     case AR_PHY_ACTIVE:
         s->phy_active = !!(val & AR_PHY_ACTIVE_EN);
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
     case AR_PHY_MODE:
     case AR_PHY_AGC_CONTROL:
     case AR_PHY_CCA:
     case AR_PHY_RFBUS_REQ:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     /*
@@ -1842,9 +1842,9 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
             s->current_channel_freq = freq;
             s->current_channel_flags = (freq < 3000) ?
                 VWIFI_CHAN_FLAG_2GHZ : VWIFI_CHAN_FLAG_5GHZ;
-            ath9k_trace("CHANNEL: tuned to %u MHz", freq);
+            vwifi_ath9k_trace("CHANNEL: tuned to %u MHz", freq);
         }
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
     }
 
@@ -1854,7 +1854,7 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     case AR_D_GBL_IFS_EIFS:
     case AR_D_GBL_IFS_MISC:
     case AR_D_FPCTL:
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         break;
 
     default:
@@ -1862,8 +1862,8 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
         if (in_range(addr, AR_Q0_TXDP, AR_NUM_QCU)) {
             q = (addr - AR_Q0_TXDP) / 4;
             s->tx_queues[q].txdp = val;
-            ath9k_trace("WRITE AR_QTXDP(%d) = 0x%08x", q, val);
-            ath9k_reg_write_raw(s, addr, val);
+            vwifi_ath9k_trace("WRITE AR_QTXDP(%d) = 0x%08x", q, val);
+            vwifi_ath9k_reg_write_raw(s, addr, val);
             break;
         }
         /* Per-queue/DCU config registers */
@@ -1879,20 +1879,20 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
             in_range(addr, AR_D0_CHNTIME, AR_NUM_DCU) ||
             in_range(addr, AR_D0_MISC, AR_NUM_DCU) ||
             in_range(addr, AR_D0_SEQNUM, AR_NUM_DCU)) {
-            ath9k_reg_write_raw(s, addr, val);
+            vwifi_ath9k_reg_write_raw(s, addr, val);
             break;
         }
         /* PHY register space */
         if (addr >= AR_PHY_BASE && addr < ATH9K_MMIO_SIZE) {
-            ath9k_reg_write_raw(s, addr, val);
+            vwifi_ath9k_reg_write_raw(s, addr, val);
             break;
         }
         /* Truly unhandled */
-        ath9k_reg_write_raw(s, addr, val);
+        vwifi_ath9k_reg_write_raw(s, addr, val);
         s->unhandled_write_count++;
         if (s->unhandled_write_count <= 200) {
-            ath9k_warn("UNHANDLED write %-24s = 0x%08x",
-                       ath9k_reg_name(addr), val);
+            vwifi_ath9k_warn("UNHANDLED write %-24s = 0x%08x",
+                       vwifi_ath9k_reg_name(addr), val);
         }
         return;
     }
@@ -1902,9 +1902,9 @@ static void ath9k_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
 /* -------------------------------------------------------------------
  *  Memory region operations
  * ------------------------------------------------------------------- */
-static const MemoryRegionOps ath9k_mmio_ops = {
-    .read  = ath9k_mmio_read,
-    .write = ath9k_mmio_write,
+static const MemoryRegionOps vwifi_ath9k_mmio_ops = {
+    .read  = vwifi_ath9k_mmio_read,
+    .write = vwifi_ath9k_mmio_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
         .min_access_size = 2,
@@ -1919,7 +1919,7 @@ static const MemoryRegionOps ath9k_mmio_ops = {
 /* -------------------------------------------------------------------
  *  Device lifecycle
  * ------------------------------------------------------------------- */
-static void ath9k_pci_init_registers(Ath9kPciState *s)
+static void vwifi_ath9k_init_registers(VwifiAth9kState *s)
 {
     int i;
 
@@ -1971,19 +1971,19 @@ static void ath9k_pci_init_registers(Ath9kPciState *s)
     s->medium_rxbuf_used = 0;
 }
 
-static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
+static void vwifi_ath9k_realize(PCIDevice *pci_dev, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(pci_dev);
+    VwifiAth9kState *s = VWIFI_ATH9K(pci_dev);
     uint8_t *pci_conf = pci_dev->config;
 
     pci_config_set_interrupt_pin(pci_conf, 1);
     pci_conf[PCI_CLASS_PROG] = 0x00;
 
-    memory_region_init_io(&s->mmio, OBJECT(s), &ath9k_mmio_ops, s,
-                          "ath9k-mmio", ATH9K_MMIO_SIZE);
+    memory_region_init_io(&s->mmio, OBJECT(s), &vwifi_ath9k_mmio_ops, s,
+                          "vwifi-ath9k-mmio", ATH9K_MMIO_SIZE);
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mmio);
 
-    ath9k_pci_init_registers(s);
+    vwifi_ath9k_init_registers(s);
     ath9k_eeprom_init_4k(s->eeprom, ATH9K_EEPROM_4K_SIZE_WORDS);
 
     /* --- MAC address assignment ---
@@ -2007,7 +2007,7 @@ static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
                 need_patch = true;
             } else {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "ath9k-virt: bad macaddr '%s' – "
+                              "vwifi-ath9k: bad macaddr '%s' – "
                               "expected xx:xx:xx:xx:xx:xx, using random\n",
                               s->macaddr);
             }
@@ -2066,11 +2066,11 @@ static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
 
     /* Create beacon timer (Phase 2 standalone self-injection) */
     s->beacon_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                   ath9k_beacon_timer_cb, s);
+                                   vwifi_ath9k_beacon_timer_cb, s);
 
     /* Create SWBA timer (Phase 3 real beacon TX via driver tasklet) */
     s->swba_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                 ath9k_swba_timer_cb, s);
+                                 vwifi_ath9k_swba_timer_cb, s);
 
     /* Create medium reconnect timer (QEMU_CLOCK_REALTIME so it fires
      * even when the guest is idle / vCPU is halted) */
@@ -2081,31 +2081,31 @@ static void ath9k_pci_realize(PCIDevice *pci_dev, Error **errp)
     if (s->medium_path && s->medium_path[0] != '\0') {
         if (!vwifi_ath9k_try_connect(s)) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "ath9k-virt: medium %s not available, "
+                          "vwifi-ath9k: medium %s not available, "
                           "will retry every %dms\n",
                           s->medium_path, MEDIUM_RECONNECT_MS);
             vwifi_ath9k_schedule_reconnect(s);
         }
     } else {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ath9k-virt: no medium path – "
+                      "vwifi-ath9k: no medium path – "
                       "standalone beacon-only mode\n");
     }
 
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "ath9k-virt: device realized – "
+                  "vwifi-ath9k: device realized – "
                   "Vendor 0x%04x Device 0x%04x "
                   "(AR9285 virtual, phase-3)\n",
                   ATHEROS_VENDOR_ID, AR9285_DEVID_PCIE);
 }
 
-static void ath9k_pci_exit(PCIDevice *pci_dev)
+static void vwifi_ath9k_exit(PCIDevice *pci_dev)
 {
-    Ath9kPciState *s = ATH9K_PCI(pci_dev);
+    VwifiAth9kState *s = VWIFI_ATH9K(pci_dev);
 
-    ath9k_beacon_timer_stop(s);
+    vwifi_ath9k_beacon_timer_stop(s);
     timer_free(s->beacon_timer);
-    ath9k_swba_timer_stop(s);
+    vwifi_ath9k_swba_timer_stop(s);
     timer_free(s->swba_timer);
     timer_del(s->medium_reconnect_timer);
     timer_free(s->medium_reconnect_timer);
@@ -2125,7 +2125,7 @@ static void ath9k_pci_exit(PCIDevice *pci_dev)
     s->node_id = NULL;
 
     qemu_log_mask(LOG_GUEST_ERROR,
-                  "ath9k-virt: device destroyed – "
+                  "vwifi-ath9k: device destroyed – "
                   "reads: %" PRIu64 " writes: %" PRIu64 " "
                   "TX: %" PRIu64 " RX: %" PRIu64 " "
                   "medium-TX: %" PRIu64 " medium-RX: %" PRIu64 "\n",
@@ -2137,31 +2137,31 @@ static void ath9k_pci_exit(PCIDevice *pci_dev)
 /* -------------------------------------------------------------------
  *  Migration (VMState)
  * ------------------------------------------------------------------- */
-static const VMStateDescription vmstate_ath9k_pci = {
-    .name = TYPE_ATH9K_PCI,
+static const VMStateDescription vmstate_vwifi_ath9k = {
+    .name = TYPE_VWIFI_ATH9K,
     .version_id = 3,
     .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
-        VMSTATE_PCI_DEVICE(parent_obj, Ath9kPciState),
-        VMSTATE_UINT32_ARRAY(regs, Ath9kPciState, ATH9K_REG_COUNT),
-        VMSTATE_UINT16_ARRAY(eeprom, Ath9kPciState,
+        VMSTATE_PCI_DEVICE(parent_obj, VwifiAth9kState),
+        VMSTATE_UINT32_ARRAY(regs, VwifiAth9kState, ATH9K_REG_COUNT),
+        VMSTATE_UINT16_ARRAY(eeprom, VwifiAth9kState,
                              ATH9K_EEPROM_4K_SIZE_WORDS),
-        VMSTATE_UINT32(isr, Ath9kPciState),
-        VMSTATE_UINT32(isr_s0, Ath9kPciState),
-        VMSTATE_UINT32(isr_s1, Ath9kPciState),
-        VMSTATE_UINT32(ier, Ath9kPciState),
-        VMSTATE_UINT32(imr, Ath9kPciState),
-        VMSTATE_UINT32(imr_s0, Ath9kPciState),
-        VMSTATE_UINT32(imr_s1, Ath9kPciState),
-        VMSTATE_UINT32(power_mode, Ath9kPciState),
-        VMSTATE_UINT32(rxdp, Ath9kPciState),
-        VMSTATE_BOOL(rx_enabled, Ath9kPciState),
-        VMSTATE_BOOL(rxdp_ring_empty, Ath9kPciState),
-        VMSTATE_BOOL(phy_active, Ath9kPciState),
-        VMSTATE_UINT32(tsf_lo, Ath9kPciState),
-        VMSTATE_UINT32(tsf_hi, Ath9kPciState),
-        VMSTATE_UINT16(current_channel_freq, Ath9kPciState),
-        VMSTATE_UINT16(current_channel_flags, Ath9kPciState),
+        VMSTATE_UINT32(isr, VwifiAth9kState),
+        VMSTATE_UINT32(isr_s0, VwifiAth9kState),
+        VMSTATE_UINT32(isr_s1, VwifiAth9kState),
+        VMSTATE_UINT32(ier, VwifiAth9kState),
+        VMSTATE_UINT32(imr, VwifiAth9kState),
+        VMSTATE_UINT32(imr_s0, VwifiAth9kState),
+        VMSTATE_UINT32(imr_s1, VwifiAth9kState),
+        VMSTATE_UINT32(power_mode, VwifiAth9kState),
+        VMSTATE_UINT32(rxdp, VwifiAth9kState),
+        VMSTATE_BOOL(rx_enabled, VwifiAth9kState),
+        VMSTATE_BOOL(rxdp_ring_empty, VwifiAth9kState),
+        VMSTATE_BOOL(phy_active, VwifiAth9kState),
+        VMSTATE_UINT32(tsf_lo, VwifiAth9kState),
+        VMSTATE_UINT32(tsf_hi, VwifiAth9kState),
+        VMSTATE_UINT16(current_channel_freq, VwifiAth9kState),
+        VMSTATE_UINT16(current_channel_flags, VwifiAth9kState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -2170,65 +2170,65 @@ static const VMStateDescription vmstate_ath9k_pci = {
  *  QOM string property for "medium" – uses object_property_add_str()
  *  instead of DEFINE_PROP_STRING (which requires hw/qdev-properties.h)
  * ------------------------------------------------------------------- */
-static char *ath9k_get_medium(Object *obj, Error **errp)
+static char *vwifi_ath9k_get_medium(Object *obj, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     return g_strdup(s->medium_path ? s->medium_path : "");
 }
 
-static void ath9k_set_medium(Object *obj, const char *value, Error **errp)
+static void vwifi_ath9k_set_medium(Object *obj, const char *value, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     g_free(s->medium_path);
     s->medium_path = g_strdup(value);
 }
 
-static char *ath9k_get_macaddr(Object *obj, Error **errp)
+static char *vwifi_ath9k_get_macaddr(Object *obj, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     return g_strdup(s->macaddr ? s->macaddr : "");
 }
 
-static void ath9k_set_macaddr(Object *obj, const char *value, Error **errp)
+static void vwifi_ath9k_set_macaddr(Object *obj, const char *value, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     g_free(s->macaddr);
     s->macaddr = g_strdup(value);
 }
 
-static char *ath9k_get_node_id(Object *obj, Error **errp)
+static char *vwifi_ath9k_get_node_id(Object *obj, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     return g_strdup(s->node_id ? s->node_id : "");
 }
 
-static void ath9k_set_node_id(Object *obj, const char *value, Error **errp)
+static void vwifi_ath9k_set_node_id(Object *obj, const char *value, Error **errp)
 {
-    Ath9kPciState *s = ATH9K_PCI(obj);
+    VwifiAth9kState *s = VWIFI_ATH9K(obj);
     g_free(s->node_id);
     s->node_id = g_strdup(value);
 }
 
-static void ath9k_pci_instance_init(Object *obj)
+static void vwifi_ath9k_instance_init(Object *obj)
 {
     object_property_add_str(obj, "medium",
-                            ath9k_get_medium,
-                            ath9k_set_medium);
+                            vwifi_ath9k_get_medium,
+                            vwifi_ath9k_set_medium);
     object_property_add_str(obj, "macaddr",
-                            ath9k_get_macaddr,
-                            ath9k_set_macaddr);
+                            vwifi_ath9k_get_macaddr,
+                            vwifi_ath9k_set_macaddr);
     object_property_add_str(obj, "node_id",
-                            ath9k_get_node_id,
-                            ath9k_set_node_id);
+                            vwifi_ath9k_get_node_id,
+                            vwifi_ath9k_set_node_id);
 }
 
-static void ath9k_pci_class_init(ObjectClass *klass, const void *data)
+static void vwifi_ath9k_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->realize   = ath9k_pci_realize;
-    k->exit      = ath9k_pci_exit;
+    k->realize   = vwifi_ath9k_realize;
+    k->exit      = vwifi_ath9k_exit;
     k->vendor_id = ATHEROS_VENDOR_ID;
     k->device_id = AR9285_DEVID_PCIE;
     k->revision  = 0x01;
@@ -2237,27 +2237,27 @@ static void ath9k_pci_class_init(ObjectClass *klass, const void *data)
     k->subsystem_vendor_id = ATHEROS_VENDOR_ID;
     k->subsystem_id        = 0x3099;
 
-    dc->desc  = "Virtual Atheros AR9285 802.11n (ath9k phase-3)";
-    dc->vmsd  = &vmstate_ath9k_pci;
+    dc->desc  = "Virtual Atheros AR9285 802.11n (vwifi-ath9k)";
+    dc->vmsd  = &vmstate_vwifi_ath9k;
 
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 
-static const TypeInfo ath9k_pci_info = {
-    .name          = TYPE_ATH9K_PCI,
+static const TypeInfo vwifi_ath9k_info = {
+    .name          = TYPE_VWIFI_ATH9K,
     .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(Ath9kPciState),
-    .instance_init = ath9k_pci_instance_init,
-    .class_init    = ath9k_pci_class_init,
+    .instance_size = sizeof(VwifiAth9kState),
+    .instance_init = vwifi_ath9k_instance_init,
+    .class_init    = vwifi_ath9k_class_init,
     .interfaces    = (InterfaceInfo[]) {
         { INTERFACE_PCIE_DEVICE },
         { },
     },
 };
 
-static void ath9k_pci_register_types(void)
+static void vwifi_ath9k_register_types(void)
 {
-    type_register_static(&ath9k_pci_info);
+    type_register_static(&vwifi_ath9k_info);
 }
 
-type_init(ath9k_pci_register_types)
+type_init(vwifi_ath9k_register_types)
