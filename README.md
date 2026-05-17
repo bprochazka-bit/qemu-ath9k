@@ -169,6 +169,84 @@ make -j$(nproc)
     -nographic
 ```
 
+## Device Arguments
+
+The device is instantiated with `-device vwifi-ath9k[,key=value,...]`.
+All arguments are optional; with no arguments the device runs in
+standalone beacon-only mode with an auto-generated MAC address.
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `medium` | string (path) | _(empty → standalone)_ | Filesystem path to the virtual-medium hub's `AF_UNIX` stream socket. When set, the device connects to the hub so frames can be exchanged with other VMs. When empty or omitted, the device runs standalone (beacon-only, no inter-VM traffic). |
+| `node_id` | string | _(empty → auto)_ | Stable identity string for this node, sent in the hello handshake when connecting to the medium hub. Lets the hub recognise the same node across reconnects regardless of its (possibly random) MAC. Ignored when no `medium` is configured. |
+| `macaddr` | string (`xx:xx:xx:xx:xx:xx`) | auto-random `00:03:7F:xx:xx:xx` | Station MAC address. The six colon-separated hex bytes are patched into the emulated EEPROM so the unmodified `ath9k` driver reads it through its normal EEPROM path. |
+
+### `medium`
+
+```bash
+-device vwifi-ath9k,medium=/tmp/vwifi.sock
+```
+
+- Path to the Unix-domain stream socket exported by a medium hub
+  (`src/ath9k_medium_hub.c` or `src/ath9k_medium_hub_scalable.c`).
+- The hub does **not** need to be running first: if the socket is
+  absent or the connection drops, the device automatically retries
+  every 2 seconds (`MEDIUM_RECONNECT_MS`). On each successful
+  connect it re-sends the `node_id` hello.
+- Empty/omitted ⇒ **standalone mode**: the device still emulates the
+  NIC and emits beacons internally, but no frames leave or enter the
+  VM. Useful for driver-probe testing without a hub.
+
+### `node_id`
+
+```bash
+-device vwifi-ath9k,medium=/tmp/vwifi.sock,node_id=ap1
+```
+
+- An arbitrary short string (e.g. `ap1`, `vm-a`, `station3`) sent to
+  the hub in the connection hello so the hub can track this node by a
+  stable name instead of its MAC.
+- Recommended whenever `macaddr` is left to auto-random, so the node
+  keeps a consistent identity across restarts/reconnects.
+- Has no effect in standalone mode (no hub to receive the hello). When
+  unset, the hello is sent without an id and logs show `node_id=(auto)`.
+
+### `macaddr`
+
+```bash
+-device vwifi-ath9k,macaddr=00:03:7F:AA:BB:CC
+```
+
+- Must be six colon-separated hex octets (`xx:xx:xx:xx:xx:xx`). The
+  value is parsed and written into EEPROM words at
+  `EEP4K_OFF_HDR_MACADDR`, so the guest `ath9k` driver picks it up via
+  its standard EEPROM MAC read.
+- If the string is malformed it is rejected with a
+  `LOG_GUEST_ERROR` warning and the device falls back to a random MAC.
+- If omitted, a MAC is auto-generated using the Atheros OUI
+  `00:03:7F` followed by three random bytes (unicast, globally
+  administered), so the driver's OUI checks pass. Set an explicit
+  `macaddr` when you need stable, non-colliding addresses across
+  several VMs sharing a medium.
+
+### Full multi-VM example
+
+Two VMs sharing one medium hub, each with a stable id and MAC:
+
+```bash
+# VM A
+qemu-system-x86_64 -machine q35 -m 2048 \
+    -device vwifi-ath9k,medium=/tmp/vwifi.sock,node_id=vm-a,macaddr=00:03:7F:00:00:01 \
+    -drive file=vm-a.qcow2,format=qcow2,if=virtio -nographic
+
+# VM B
+qemu-system-x86_64 -machine q35 -m 2048 \
+    -device vwifi-ath9k,medium=/tmp/vwifi.sock,node_id=vm-b,macaddr=00:03:7F:00:00:02 \
+    -drive file=vm-b.qcow2,format=qcow2,if=virtio -nographic
+```
+
+See `CHEATSHEET.md` for more ready-to-run command lines.
+
 ## Debugging
 
 ### Viewing Register Accesses
