@@ -111,12 +111,24 @@ make test QEMU_SRC=/path/to/qemu
 
 # 6. (Optional) Run with a Linux guest
 make test QEMU_SRC=/path/to/qemu GUEST_IMAGE=/path/to/guest.qcow2
+
+# 7. (Optional) Install the built binary system-wide
+make install QEMU_SRC=/path/to/qemu
 ```
 
 Or do it all in one command:
 
 ```bash
 make all QEMU_SRC=/path/to/qemu
+```
+
+`make all` ends with `make install`, which installs the built
+`qemu-system-x86_64` into `INSTALL_PREFIX` (default `/usr/local`). The
+install step is skipped automatically if the binary is already present,
+so re-running `make all` is safe. To install elsewhere (no root needed):
+
+```bash
+make install QEMU_SRC=/path/to/qemu INSTALL_PREFIX=$HOME/.local
 ```
 
 ## Manual Build (Step by Step)
